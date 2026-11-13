@@ -1,0 +1,60 @@
+# Phase 0 baseline: one Parcae (or GPT) pretraining run on a single 8-GPU node.
+#
+# Fill in the three CHANGE-ME values, then:
+#   kubectl apply -f loop_cluster/k8s/parcae-baseline-job.yaml
+# For the GPT baseline, copy this file and change metadata.name, CONFIG and RUN_NAME
+# (launch_configs/parcae/pretrain/gpt-small-140m.yaml / gpt-small-140m).
+#
+# The Parcae configs read data from /resource/data/..., so the volume is mounted at
+# /resource and the repo is cloned into /resource/parcae. The first run downloads
+# FineWeb-Edu 100BT into /resource/data; later runs reuse it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: parcae-small-140m
+  namespace: CHANGE-ME-namespace
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: train
+          image: ghcr.io/sandyresearch/parcae:sha-49c27cb   # same tag as launch_job.slurm
+          workingDir: /resource
+          env:
+            - name: CONFIG
+              value: launch_configs/parcae/pretrain/parcae-small-140m.yaml
+            - name: RUN_NAME
+              value: parcae-small-140m
+            - name: NUM_GPUS
+              value: "8"
+            - name: HF_HOME
+              value: /resource/hf-cache
+            - name: WANDB_MODE          # set to "online" and add WANDB_API_KEY from a Secret to log to W&B
+              value: offline
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              [ -d /resource/parcae/.git ] || git clone -b loop-cluster https://github.com/Dreamer312/parcae.git /resource/parcae
+              cd /resource/parcae
+              pip install -q -e .
+              [ -d /resource/data/fineweb-edu-shuffled/data/sample-100BT ] || python scripts/download_data.py fineweb-100bt
+              bash runs/run_training.sh "$CONFIG" "$RUN_NAME" parcae "$NUM_GPUS"
+          resources:
+            limits:
+              nvidia.com/gpu: 8          # CHANGE-ME if your cluster names the GPU resource differently
+          volumeMounts:
+            - name: resource
+              mountPath: /resource
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: resource
+          persistentVolumeClaim:
+            claimName: CHANGE-ME-pvc     # needs room for the dataset, checkpoints and the HF cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
