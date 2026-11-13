@@ -35,8 +35,10 @@ python loop_cluster/diagnose_loop_clusters.py \
   --out diag-140m.json
 ```
 
-One GPU is enough. Repeat with the larger released checkpoints (check the exact names
-under the SandyResearch org on Hugging Face) to see how the numbers move with model size.
+One GPU is enough. Repeat with `SandyResearch/parcae-370m`, `parcae-770m` and
+`parcae-1.3b` to see how the numbers move with model size.
+
+Background, decisions so far and next steps: see `HANDOFF.md`.
 
 How to read the output:
 
