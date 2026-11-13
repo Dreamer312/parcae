@@ -1,13 +1,17 @@
 # Phase 0 baseline: one Parcae (or GPT) pretraining run on a single 8-GPU node.
+# Written for a cluster WITHOUT internet: nothing is cloned or downloaded at start-up.
 #
-# Fill in the three CHANGE-ME values, then:
+# Before applying, the volume mounted at /resource must already hold:
+#   /resource/parcae                                  this repo, branch loop-cluster
+#   /resource/data/fineweb-edu-shuffled/data/...      sample-100BT/train and val/train
+#   /resource/tokenizers/parcae-tokenizer             copy of SandyResearch/parcae-tokenizer
+# and `tokenizer_path` in the launch config must point at that tokenizer directory
+# (the configs ship with the Hub name, which cannot be resolved offline).
+#
+# Fill in the four CHANGE-ME values, then:
 #   kubectl apply -f loop_cluster/k8s/parcae-baseline-job.yaml
 # For the GPT baseline, copy this file and change metadata.name, CONFIG and RUN_NAME
 # (launch_configs/parcae/pretrain/gpt-small-140m.yaml / gpt-small-140m).
-#
-# The Parcae configs read data from /resource/data/..., so the volume is mounted at
-# /resource and the repo is cloned into /resource/parcae. The first run downloads
-# FineWeb-Edu 100BT into /resource/data; later runs reuse it.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -20,8 +24,8 @@ spec:
       restartPolicy: Never
       containers:
         - name: train
-          image: ghcr.io/sandyresearch/parcae:sha-49c27cb   # same tag as launch_job.slurm
-          workingDir: /resource
+          image: CHANGE-ME-registry/parcae-offline:torch2.5   # built from loop_cluster/docker/Dockerfile.offline
+          workingDir: /resource/parcae
           env:
             - name: CONFIG
               value: launch_configs/parcae/pretrain/parcae-small-140m.yaml
@@ -31,16 +35,14 @@ spec:
               value: "8"
             - name: HF_HOME
               value: /resource/hf-cache
-            - name: WANDB_MODE          # set to "online" and add WANDB_API_KEY from a Secret to log to W&B
+            - name: WANDB_MODE
               value: offline
           command: ["bash", "-lc"]
           args:
             - |
               set -euo pipefail
-              [ -d /resource/parcae/.git ] || git clone -b loop-cluster https://github.com/Dreamer312/parcae.git /resource/parcae
-              cd /resource/parcae
-              pip install -q -e .
-              [ -d /resource/data/fineweb-edu-shuffled/data/sample-100BT ] || python scripts/download_data.py fineweb-100bt
+              # Registers the repo's packages only; every dependency is already in the image.
+              pip install -q --no-deps --no-build-isolation -e .
               bash runs/run_training.sh "$CONFIG" "$RUN_NAME" parcae "$NUM_GPUS"
           resources:
             limits:
@@ -53,7 +55,7 @@ spec:
       volumes:
         - name: resource
           persistentVolumeClaim:
-            claimName: CHANGE-ME-pvc     # needs room for the dataset, checkpoints and the HF cache
+            claimName: CHANGE-ME-pvc     # holds the repo, dataset, tokenizer and checkpoints
         - name: shm
           emptyDir:
             medium: Memory

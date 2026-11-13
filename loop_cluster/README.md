@@ -6,7 +6,27 @@ on this branch; these are additions only.
 | File | What it is |
 | --- | --- |
 | `diagnose_loop_clusters.py` | Inference-only diagnostic on a Parcae checkpoint: how the token states cluster across loops, and how much loss is lost when prefix tokens are merged into cluster means. |
-| `k8s/parcae-baseline-job.yaml` | Kubernetes Job for one pretraining run on a single 8-GPU pod. |
+| `k8s/parcae-baseline-job.yaml` | Kubernetes Job for one pretraining run on a single 8-GPU pod, for a cluster without internet. |
+| `docker/Dockerfile.offline` | Image with every training dependency preinstalled on a PyTorch 2.5 base. Not yet built. |
+
+## Offline setup
+
+The cluster has no internet, so three things are fetched elsewhere and copied over:
+
+```bash
+# 1. image: build where PyPI is reachable, push to the internal registry
+docker build -f loop_cluster/docker/Dockerfile.offline --build-arg BASE_IMAGE=<pytorch 2.5 image> -t <registry>/parcae-offline:torch2.5 .
+# 2. tokenizer
+huggingface-cli download SandyResearch/parcae-tokenizer --local-dir /resource/tokenizers/parcae-tokenizer
+# 3. released checkpoint, for the diagnostic and for comparing validation loss
+huggingface-cli download SandyResearch/parcae-140m --local-dir /resource/models/parcae-140m
+```
+
+Then set `tokenizer_path` in the launch config to `/resource/tokenizers/parcae-tokenizer`,
+and pass local directories to the diagnostic:
+`--model /resource/models/parcae-140m --tokenizer /resource/tokenizers/parcae-tokenizer`.
+
+No flash-attn install is needed; see the header of `docker/Dockerfile.offline`.
 
 **Status: the diagnostic script has only been syntax-checked. It has never been run.**
 Expect to fix small things on the first run.
@@ -53,7 +73,7 @@ How to read the output:
 
 ## Baseline training
 
-Fill in the three `CHANGE-ME` values in `k8s/parcae-baseline-job.yaml` (namespace, PVC,
-GPU resource name), then `kubectl apply -f` it. It mounts the PVC at `/resource`, clones
-this branch into `/resource/parcae` and skips the dataset download if the data is
-already there. Logging is W&B offline by default.
+Fill in the four `CHANGE-ME` values in `k8s/parcae-baseline-job.yaml` (namespace, image,
+PVC, GPU resource name), then `kubectl apply -f` it. It mounts the PVC at `/resource` and
+expects the repo at `/resource/parcae`, the data under `/resource/data` and the tokenizer
+under `/resource/tokenizers`; nothing is downloaded at start-up. Logging is W&B offline.

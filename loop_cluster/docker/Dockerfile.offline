@@ -1,0 +1,82 @@
+# Parcae training image for a cluster WITHOUT internet, built on your own PyTorch 2.5 base.
+#
+# Build on a machine that can reach PyPI and your registry, then push:
+#   docker build -f loop_cluster/docker/Dockerfile.offline \
+#       --build-arg BASE_IMAGE=<your pytorch 2.5 image> -t <registry>/parcae-offline:torch2.5 .
+#
+# NOT YET BUILT OR RUN. The pins below are releases from the PyTorch 2.5 period
+# (late 2024); each one exists on PyPI, but the set has not been tested together.
+#
+# What is deliberately left out, and why:
+#   flash-attn                  never used. Attention goes through PyTorch's built-in
+#                               scaled_dot_product_attention. FlashAttention-3 is only tried
+#                               through the `kernels` package, which downloads a prebuilt
+#                               kernel from the HF Hub at import time; offline that fails
+#                               and the code silently falls back to the built-in path.
+#   liger-kernel                only for use_fused_head="liger" (default is "pytorch")
+#   flash-linear-attention      only for the KDA mixer, not used by the parcae-*/gpt-* configs
+#   axonn                       only for the tensor-parallel strategy (configs use ddp)
+ARG BASE_IMAGE=CHANGE-ME
+FROM ${BASE_IMAGE}
+
+# torch.compile is on in the launch configs (compile_model: True). It generates Triton
+# kernels, and Triton needs a C compiler at run time.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential git \
+ && rm -rf /var/lib/apt/lists/*
+
+# Fail early if the base image cannot work: Python >= 3.11 (required by the repo),
+# PyTorch 2.4+ (the repo's stated minimum), Triton present, Python headers present
+# (Triton compiles a small C launcher against Python.h; on a system Python install
+# `python3-dev` in the apt line above). If Triton is missing, add `pip install triton==3.1.0`
+# before this step: that is the version the PyTorch 2.5 wheels depend on.
+# Assumes a Debian/Ubuntu base and that `python` and `pip` are on PATH.
+RUN python -c "import sys, os, sysconfig, torch, triton; \
+assert sys.version_info >= (3, 11), sys.version; \
+assert tuple(map(int, torch.__version__.split('+')[0].split('.')[:2])) >= (2, 4), torch.__version__; \
+assert os.path.exists(os.path.join(sysconfig.get_paths()['include'], 'Python.h')), 'Python.h missing'; \
+print('python', sys.version.split()[0], '| torch', torch.__version__, '| triton', triton.__version__)"
+
+# Keep pip from replacing the base image's PyTorch while it resolves the rest.
+RUN python -c "import torch; print('torch==' + torch.__version__.split('+')[0])" > /tmp/constraints.txt \
+ && cat /tmp/constraints.txt
+
+# Needed to train (scripts/train.py) and to run loop_cluster/diagnose_loop_clusters.py.
+RUN pip install --no-cache-dir -c /tmp/constraints.txt \
+    "setuptools>=68.2.2" wheel \
+    "numpy==1.26.4" \
+    einops \
+    "lightning==2.3.0.dev20240328" \
+    "pytorch-lightning==2.4.0" \
+    "lightning-utilities==0.11.9" \
+    "torchmetrics==1.5.2" \
+    "torchdata==0.9.0" \
+    "jsonargparse[signatures]==4.34.0" \
+    "transformers==4.46.3" \
+    "tokenizers==0.20.3" \
+    "huggingface-hub==0.26.2" \
+    "datasets==3.1.0" \
+    "pyarrow==18.0.0" \
+    "safetensors==0.4.5" \
+    "sentencepiece==0.2.0" \
+    "wandb==0.18.7" \
+    tensorboard pandas plotly pyyaml tqdm requests filelock jinja2 ninja
+
+# Needed only by scripts/eval.py (it imports lm_eval at start-up). Drop this layer if it
+# causes dependency trouble and you only need training.
+RUN pip install --no-cache-dir -c /tmp/constraints.txt "lm-eval==0.4.5"
+
+# PyTorch must be unchanged after all of the above.
+RUN python -c "import torch; print('torch==' + torch.__version__.split('+')[0])" | diff - /tmp/constraints.txt \
+ && python -c "import lightning, torchdata.stateful_dataloader, torchmetrics, jsonargparse, transformers, datasets, pyarrow, wandb; \
+from transformers.cache_utils import DynamicCache; \
+from torch.utils.checkpoint import create_selective_checkpoint_contexts, CheckpointPolicy; \
+print('imports ok')"
+
+# Nothing may try to reach the network at run time.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1 \
+    WANDB_MODE=offline
+
+WORKDIR /resource

@@ -16,7 +16,8 @@
 
 ## 2. 环境和约束
 
-- 集群是 k8s，任务都跑在容器里，能访问 HuggingFace 和 GitHub。
+- 集群是 k8s，任务都跑在容器里。**服务器不联网**（用户 11-13 更正；更早说过能访问 HuggingFace 和 GitHub，以后来的说法为准）。镜像要在能联网的机器上提前打好，分词器、官方 checkpoint 也要提前下好拷进去。
+- 基础镜像是用户自己的 PyTorch 2.5 镜像，不是官方的 `ghcr.io/sandyresearch/parcae`（官方镜像基于更新的 PyTorch，而且启动时还要联网装包）。离线镜像的做法见 `loop_cluster/docker/Dockerfile.offline`。
 - 常驻 16–32 张 H100，之后可能换成 32 张 H200。H200 主要是显存更大，算力和 H100 接近。
 - 140M 和 370M 的实验用单个 8 卡 pod 就够，可以同时跑 2–4 个。770M 以上需要跨节点，集群有没有多节点训练组件（比如 Kubeflow Training Operator）还没问到。
 - ICML 2027 的官方征稿还没发布。第三方估计是 2027-01-16 交摘要、01-22 交全文，**未经确认**。
@@ -36,14 +37,16 @@
 分支 `loop-cluster` 基于 `main`（`4b86c2a`）。`parcae_lm/` 没有任何改动，只新增了：
 
 - `loop_cluster/diagnose_loop_clusters.py`：诊断脚本
-- `loop_cluster/k8s/parcae-baseline-job.yaml`：单个 8 卡 pod 的训练任务模板
+- `loop_cluster/k8s/parcae-baseline-job.yaml`：单个 8 卡 pod 的训练任务模板（离线版）
+- `loop_cluster/docker/Dockerfile.offline`：在 PyTorch 2.5 基础镜像上装好全部依赖的离线镜像
 - `loop_cluster/README.md`：数据下载、运行命令、结果怎么读
 - `loop_cluster/HANDOFF.md`：本文件
 
 **没验证过的东西，请当成草稿对待：**
 
 - 诊断脚本**只做过语法检查，从没运行过**。写它的机器上没有 torch。第一次跑大概率要修小问题。
-- k8s 模板从没 apply 过。里面有三处 `CHANGE-ME`（namespace、PVC 名、GPU 资源名）要用户填。镜像标签 `sha-49c27cb` 抄自仓库的 `launch_job.slurm`，没有实际拉取验证。
+- k8s 模板从没 apply 过。里面有四处 `CHANGE-ME`（namespace、镜像地址、PVC 名、GPU 资源名）要用户填。
+- `Dockerfile.offline` 从没构建过。里面固定的版本都是 PyTorch 2.5 同期（2024 年底）的发行版，逐个确认过在 PyPI 上存在，但这一组合没有一起测过。官方环境用的是更新的 PyTorch 和不固定版本的依赖，所以训练能跑通不等于推理、评估路径也没问题（比如 `parcae_lm/utils/cache.py` 依赖 transformers 的 `DynamicCache`）。
 - 数据集大小是估的：验证集 7.3GB 是实数；100BT 只统计了前 999 个文件（93.9GB），共 1823 个文件，按比例估约 170GB。
 - 训练时间是按计算量估的，没有实测：16 张 H100 上，140M 约 1–2 小时，370M 约 4–8 小时，770M 约 1 天，1.3B 约 3–4 天。
 
@@ -95,7 +98,11 @@
 - 配置文件把数据路径写死为 `/resource/data/...`。仓库自己的启动脚本是把仓库本身挂载到 `/resource`；我们的 k8s 模板是把 PVC 挂到 `/resource`、仓库克隆到 `/resource/parcae`。两种都能用，但别混。
 - 训练日志只走 W&B。模板里设了 `WANDB_MODE=offline`，要在线记录需要用户提供密钥。
 - `.gitignore` 忽略了 `data`、`diagnostics/`、`experiments/`、`outputs/`、`tmp/`，以及 `*.csv`、`*.png`、`*.html`、`*.pt`、`*.parquet`、`*.log`、`*.pdf`。新建目录或想提交结果文件时注意别撞上。诊断的 JSON 不在忽略列表里。
-- 仓库在容器里的安装方式是在根目录 `pip install -q -e .`。
+- 仓库在容器里的安装方式是在根目录 `pip install -q -e .`。离线时要加 `--no-deps --no-build-isolation`，否则 pip 会去联网解析依赖和构建环境。
+- **不需要装 flash-attn。** 注意力走 PyTorch 自带的 `scaled_dot_product_attention`。代码只会在 Hopper 架构的卡上通过 `kernels` 包尝试从 HF Hub 下载 FlashAttention-3，失败就静默回退（见 `parcae_lm/attention_backends/flash_attention.py`）。离线环境下一定是回退路径。
+- 以下三个包在 `pyproject.toml` 里，但 140M 的两个基线配置用不到，离线镜像里没装：`liger-kernel`（只有 `use_fused_head="liger"` 才用）、`flash-linear-attention`（只有 KDA mixer 才用）、`axonn`（只有张量并行策略才用）。
+- 配置里 `compile_model: True`，`torch.compile` 生成 Triton 内核，运行时需要容器里有 C 编译器和 Python 头文件。
+- 配置里的 `tokenizer_path` 是 Hub 上的名字 `SandyResearch/parcae-tokenizer`，离线解析不了，要改成本地目录。`parcae_lm.from_pretrained` 和分词器都接受本地目录。
 
 ## 8. 时间表
 
